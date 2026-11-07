@@ -8,25 +8,23 @@ $selfHostPath = 'HKLM:\SOFTWARE\Microsoft\WindowsSelfHost\Applicability'
 if (Test-Path $selfHostPath) {
     $selfHostInfo = Get-ItemProperty -Path $selfHostPath -ErrorAction SilentlyContinue
     if ($null -ne $selfHostInfo -and $selfHostInfo.PSObject.Properties.Name -contains 'BranchName') {
-        $channel = $selfHostInfo.BranchName
+        $channel = [string]$selfHostInfo.BranchName
     }
 }
 
-$buildNumber = $buildInfo.CurrentBuild
+$buildNumber = [int]$buildInfo.CurrentBuild
 $ubr = if ($null -ne $buildInfo.UBR) { [int]$buildInfo.UBR } else { 0 }
-$displayVersion = if ($null -ne $buildInfo.DisplayVersion) { $buildInfo.DisplayVersion } else { 'Unknown' }
-$productName = if ($null -ne $buildInfo.ProductName) { $buildInfo.ProductName } else { 'Windows' }
-$releaseId = if ($null -ne $buildInfo.ReleaseId) { $buildInfo.ReleaseId } else { 'Unknown' }
+$displayVersion = if ($null -ne $buildInfo.DisplayVersion) { [string]$buildInfo.DisplayVersion } else { 'Unknown' }
+$productName = if ($null -ne $buildInfo.ProductName) { [string]$buildInfo.ProductName } else { 'Windows' }
+$releaseId = if ($null -ne $buildInfo.ReleaseId) { [string]$buildInfo.ReleaseId } else { 'Unknown' }
 
-$result = [pscustomobject]@{
+[pscustomobject]@{
     ProductName = $productName
     DisplayVersion = $displayVersion
     ReleaseId = $releaseId
-    CurrentBuild = [int]$buildNumber
+    CurrentBuild = $buildNumber
     UBR = $ubr
     FullBuild = "{0}.{1}" -f $buildNumber, $ubr
     Channel = $channel
     TimestampUtc = (Get-Date).ToUniversalTime().ToString('o')
-}
-
-$result | ConvertTo-Json -Compress
+} | ConvertTo-Json -Compress

@@ -1,145 +1,96 @@
-import argparse
+"""Poll official Microsoft sources for notes matching a Windows Insider build."""
+
+from __future__ import annotations
+
+import html
 import json
-import os
 import re
-import subprocess
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List
-from urllib import parse, request, error
-
-from insider_sources import MicrosoftSources
-
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS_DIR = ROOT / 'scripts'
-REPORTS_DIR = ROOT / 'reports'
+import xml.etree.ElementTree as ET
+from typing import Any
+from urllib.error import URLError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 
-def run_powershell_build_query() -> Dict[str, Any]:
-    powershell_script = SCRIPTS_DIR / 'Get-WindowsBuild.ps1'
-    if not powershell_script.exists():
-        raise FileNotFoundError(f'PowerShell script not found: {powershell_script}')
+class MicrosoftSources:
+    """Search the Insider Blog RSS feed and Microsoft Learn search."""
 
-    command = [
-        'powershell',
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        str(powershell_script),
-    ]
+    FEED_URL = "https://blogs.windows.com/windows-insider/feed/"
+    LEARN_SEARCH_URL = "https://learn.microsoft.com/api/search?search={query}&locale=en-us&$top=10"
+    USER_AGENT = "WindowsInsiderBuildAgent/0.1 (+https://github.com/one-angel997/windows-insider-build-agent)"
 
-    result = subprocess.run(command, capture_output=True, text=True, shell=False)
+    def __init__(self, build_number: int | str, timeout: int = 20) -> None:
+        self.build_number = str(build_number)
+        self.timeout = timeout
 
-    if result.returncode != 0:
-        raise RuntimeError(f"PowerShell failed: {result.stderr.strip() or result.stdout.strip()}")
+    def _fetch_text(self, url: str) -> str:
+        request = Request(url, headers={"User-Agent": self.USER_AGENT, "Accept": "application/rss+xml, application/xml, application/json, text/html, */*"})
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                charset = response.headers.get_content_charset() or "utf-8"
+                return response.read().decode(charset, errors="replace")
+        except (URLError, TimeoutError, OSError):
+            return ""
 
-    output = result.stdout.strip()
-    if not output:
-        raise RuntimeError('PowerShell returned no output.')
+    def _matches_build(self, text: str) -> bool:
+        return bool(re.search(rf"(?<!\d){re.escape(self.build_number)}(?!\d)", text))
 
-    try:
-        data = json.loads(output)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f'PowerShell output is not valid JSON: {output}') from exc
+    @staticmethod
+    def _local_name(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1].lower()
 
-    return data
+    @staticmethod
+    def _plain_text(value: str) -> str:
+        value = re.sub(r"<[^>]+>", " ", value)
+        return " ".join(html.unescape(value).split())
 
+    def search_windows_insider_blog(self) -> list[dict[str, Any]]:
+        xml_text = self._fetch_text(self.FEED_URL)
+        if not xml_text:
+            return []
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            return []
 
-def save_report(report: Dict[str, Any], output_path: str | None = None) -> Path:
-    REPORTS_DIR.mkdir(exist_ok=True)
-    if output_path:
-        path = REPORTS_DIR / output_path
-    else:
-        timestamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-        path = REPORTS_DIR / f'build-report-{timestamp}.json'
-    path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
-    return path
+        notes: list[dict[str, Any]] = []
+        for item in (element for element in root.iter() if self._local_name(element.tag) == "item"):
+            values = {self._local_name(child.tag): (child.text or "") for child in item}
+            title = self._plain_text(values.get("title", ""))
+            description = self._plain_text(values.get("description", ""))
+            link = values.get("link", "").strip()
+            if link and self._matches_build(f"{title} {description}"):
+                notes.append({"source": "Windows Insider Blog", "title": title, "url": link, "summary": description[:500]})
+        return notes
 
+    def search_learn(self) -> list[dict[str, Any]]:
+        query = quote(f'Windows 11 Insider Preview build {self.build_number}')
+        body = self._fetch_text(self.LEARN_SEARCH_URL.format(query=query))
+        if not body:
+            return []
+        try:
+            results = json.loads(body).get("results", [])
+        except (json.JSONDecodeError, AttributeError):
+            return []
 
-def build_markdown_report(report: Dict[str, Any]) -> str:
-    build = report.get('build', {})
-    notes = report.get('notes', [])
+        notes: list[dict[str, Any]] = []
+        for item in results if isinstance(results, list) else []:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            url = str(item.get("url") or "").strip()
+            summary = str(item.get("description") or item.get("descriptionText") or "").strip()
+            if title and url and self._matches_build(f"{title} {summary}"):
+                notes.append({"source": "Microsoft Learn", "title": title, "url": url, "summary": summary[:500]})
+        return notes
 
-    lines = [
-        '# Windows Insider Build Report',
-        '',
-        f'- Build: {build.get("CurrentBuild") or "Unknown"}',
-        f'- UBR: {build.get("UBR") or "Unknown"}',
-        f'- Full Build: {build.get("FullBuild") or "Unknown"}',
-        f'- Channel: {build.get("Channel") or "Unknown"}',
-        f'- Product: {build.get("ProductName") or "Unknown"}',
-        f'- Timestamp: {build.get("TimestampUtc") or "Unknown"}',
-        '',
-        '## Note ufficiali trovate',
-    ]
-
-    if not notes:
-        lines.append('Nessuna nota ufficiale trovata per questa build. Potrebbe essere ancora in fase di pubblicazione.')
-    else:
-        for index, note in enumerate(notes, 1):
-            lines.append(f'{index}. **{note.get("title", "Titolo non disponibile")}**')
-            lines.append(f'   - Source: {note.get("source", "Unknown")}')
-            lines.append(f'   - URL: {note.get("url", "") }')
-            summary = note.get('summary', '').strip()
-            if summary:
-                lines.append(f'   - Summary: {summary}')
-            lines.append('')
-
-    return '\n'.join(lines) + '\n'
-
-
-def analyze() -> Dict[str, Any]:
-    build_info = run_powershell_build_query()
-    build_number = build_info.get('CurrentBuild')
-    if not build_number:
-        raise ValueError('CurrentBuild not found in Windows registry.')
-
-    sources = MicrosoftSources(build_number)
-    notes = sources.search_all()
-
-    report = {
-        'build': build_info,
-        'build_number': build_number,
-        'notes': notes,
-        'generated_at_utc': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-    }
-    return report
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Windows Insider Build Agent')
-    parser.add_argument('--output-md', action='store_true', help='Generate Markdown report as well.')
-    return parser.parse_args()
-
-
-def main() -> int:
-    try:
-        report = analyze()
-        json_path = save_report(report)
-
-        print(f'Build rilevata: {report["build"].get("FullBuild", "Unknown")}')
-        print(f'Report JSON salvato in: {json_path}')
-
-        if len(report['notes']) > 0:
-            print(f'Note trovate: {len(report["notes"])}')
-        else:
-            print('Nessuna nota ufficiale trovata per la build corrente.')
-
-        args = parse_args()
-        if args.output_md:
-            md_content = build_markdown_report(report)
-            md_path = REPORTS_DIR / f'build-report-{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}.md'
-            md_path.write_text(md_content, encoding='utf-8')
-            print(f'Report Markdown salvato in: {md_path}')
-
-    except Exception as exc:  # pragma: no cover
-        print(f'Errore: {exc}', file=sys.stderr)
-        return 1
-
-    return 0
-
-
-if __name__ == '__main__':
-    sys.exit(main())
+    def search_all(self) -> list[dict[str, Any]]:
+        results = self.search_windows_insider_blog() + self.search_learn()
+        unique: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for note in results:
+            key = note.get("url") or f"{note.get('source')}:{note.get('title')}"
+            if key not in seen:
+                seen.add(key)
+                unique.append(note)
+        return unique
