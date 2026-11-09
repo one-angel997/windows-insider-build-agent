@@ -81,6 +81,7 @@ def write_report(report: dict[str, Any], build_key: str) -> tuple[Path, Path]:
 def build_markdown_report(report: dict[str, Any]) -> str:
     build = report["build"]
     notes = report["notes"]
+    direct_url = report.get("build_notes_url")
     lines = [
         "# Rapporto Windows Insider",
         "",
@@ -91,14 +92,21 @@ def build_markdown_report(report: dict[str, Any]) -> str:
         f"- Controllato (UTC): {report['checked_at_utc']}",
         f"- Stato: {report['status']}",
         "",
-        "## Note ufficiali",
     ]
+    if direct_url:
+        lines.extend([f"## [Apri le note ufficiali della build {build.get('FullBuild', 'corrente')}]({direct_url})", ""])
+    elif notes:
+        lines.extend(["## Link diretto alle note", "", "Non è stato possibile identificare un link diretto univoco. Consulta i link delle singole note riportati sotto.", ""])
+    else:
+        lines.extend(["## Link alle note", "", "Non è ancora stato trovato un link diretto alle note di questa build; la ricerca verrà ripetuta al prossimo controllo.", ""])
+
+    lines.append("## Note ufficiali")
     if not notes:
         lines.extend(["", "Non sono state trovate note ufficiali per questa build. La ricerca verrà ripetuta al prossimo controllo."])
     else:
         lines.append("")
         for note in notes:
-            lines.extend([f"### {note['title']}", "", f"- Fonte: {note['source']}", f"- Link: {note['url']}"])
+            lines.extend([f"### {note['title']}", "", f"- Fonte: {note['source']}", f"- Link diretto: {note['url']}"])
             if note.get("summary"):
                 lines.extend(["", note["summary"]])
             lines.append("")
@@ -119,11 +127,18 @@ def check_once(force: bool = False) -> dict[str, Any]:
 
     notes = MicrosoftSources(build["CurrentBuild"]).search_all()
     status = "notes_found" if notes else "notes_pending"
+    # The sources return article URLs for matched notes. Prefer the Insider Blog
+    # article as the primary link; otherwise use the first matching official result.
+    primary_note = next((note for note in notes if note.get("source") == "Windows Insider Blog"), None)
+    if primary_note is None and notes:
+        primary_note = notes[0]
+
     report = {
         "build": build,
         "previous_build": previous_build,
         "build_changed": changed,
         "status": status,
+        "build_notes_url": primary_note.get("url") if primary_note else None,
         "notes": notes,
         "checked_at_utc": utc_now(),
     }
@@ -139,6 +154,7 @@ def check_once(force: bool = False) -> dict[str, Any]:
     print(f"Build rilevata: {build_key} ({build.get('Channel', 'channel sconosciuto')})")
     if notes:
         print(f"Trovate {len(notes)} nota/e ufficiale/i.")
+        print(f"Link diretto alle note: {report['build_notes_url']}")
     else:
         print("Note non ancora trovate: verranno cercate di nuovo al prossimo controllo.")
     print(f"Report: {md_path}")
