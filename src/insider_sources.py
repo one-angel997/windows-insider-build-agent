@@ -65,25 +65,33 @@ class MicrosoftSources:
         return notes
 
     def search_learn(self) -> list[dict[str, Any]]:
-        build_label = f"{self.build_number}-{self.ubr}" if self.ubr is not None else self.build_number
-        query = quote(f'Windows Insider release notes preview build {build_label}')
-        body = self._fetch_text(self.LEARN_SEARCH_URL.format(query=query))
-        if not body:
-            return []
-        try:
-            results = json.loads(body).get("results", [])
-        except (json.JSONDecodeError, AttributeError):
-            return []
+        # Microsoft may publish notes against the base release UBR (often 1000),
+        # while the installed OS has a later servicing UBR (for example 1010).
+        queries = []
+        if self.ubr is not None:
+            queries.append(f"Windows Insider release notes preview build {self.build_number}-{self.ubr}")
+        queries.append(f"Windows Insider release notes preview build {self.build_number}")
 
         notes: list[dict[str, Any]] = []
-        for item in results if isinstance(results, list) else []:
-            if not isinstance(item, dict):
+        seen: set[str] = set()
+        for search_query in queries:
+            body = self._fetch_text(self.LEARN_SEARCH_URL.format(query=quote(search_query)))
+            if not body:
                 continue
-            title = str(item.get("title") or "").strip()
-            url = str(item.get("url") or "").strip()
-            summary = str(item.get("description") or item.get("descriptionText") or "").strip()
-            if title and url and self._matches_build(f"{title} {url} {summary}"):
-                notes.append({"source": "Microsoft Learn", "title": title, "url": url, "summary": summary[:500]})
+            try:
+                results = json.loads(body).get("results", [])
+            except (json.JSONDecodeError, AttributeError):
+                continue
+
+            for item in results if isinstance(results, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                url = str(item.get("url") or "").strip()
+                summary = str(item.get("description") or item.get("descriptionText") or "").strip()
+                if title and url and self._matches_build(f"{title} {url} {summary}") and url not in seen:
+                    seen.add(url)
+                    notes.append({"source": "Microsoft Learn", "title": title, "url": url, "summary": summary[:500]})
         return notes
 
     def search_all(self) -> list[dict[str, Any]]:

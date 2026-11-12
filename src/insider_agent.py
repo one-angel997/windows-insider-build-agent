@@ -81,10 +81,10 @@ def write_report(report: dict[str, Any], build_key: str) -> tuple[Path, Path]:
 
 
 def find_direct_release_notes_url(notes: list[dict[str, Any]], build_number: int | str, ubr: int | str | None) -> str | None:
-    """Return only a build-specific Microsoft Learn release-notes URL, never Flight Hub."""
+    """Select a release-note URL for this build; allow base UBR notes such as 1000."""
     build = re.escape(str(build_number))
-    suffix = rf"-{re.escape(str(ubr))}" if ubr is not None else r"(?:-\d+)?"
-    expected_build = re.compile(rf"(?<!\d){build}{suffix}(?!\d)")
+    release_slug = re.compile(rf"(?:^|/)preview-build-{build}-(\d+)(?:/|$)", re.IGNORECASE)
+    candidates: list[tuple[int, str]] = []
     for note in notes:
         url = str(note.get("url", ""))
         parsed = urlparse(url)
@@ -93,10 +93,16 @@ def find_direct_release_notes_url(notes: list[dict[str, Any]], build_number: int
             note.get("source") == "Microsoft Learn"
             and parsed.netloc.lower() in {"learn.microsoft.com", "www.learn.microsoft.com"}
             and "/windows-insider/release-notes/" in path
-            and expected_build.search(path)
         ):
-            return url
-    return None
+            match = release_slug.search(path)
+            if match:
+                revision = match.group(1)
+                # Prefer the exact installed UBR, then Microsoft's common base
+                # release UBR 1000, then any other page for the same build.
+                rank = 3 if ubr is not None and revision == str(ubr) else 2 if revision == "1000" else 1
+                candidates.append((rank, url))
+    candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+    return candidates[0][1] if candidates else None
 
 
 def build_markdown_report(report: dict[str, Any]) -> str:
@@ -117,7 +123,7 @@ def build_markdown_report(report: dict[str, Any]) -> str:
     if direct_url:
         lines.extend([f"## [Apri le note ufficiali della build {build.get('FullBuild', 'corrente')}]({direct_url})", ""])
     else:
-        lines.extend(["## Link diretto alle note", "", "Non è stata trovata una pagina Microsoft Learn di release notes che corrisponda esattamente a questa build. Il Flight Hub e le pagine generiche non vengono usati come link diretto.", ""])
+        lines.extend(["## Link diretto alle note", "", "Non è stata trovata una pagina Microsoft Learn di release notes per questa build. Il Flight Hub e le pagine generiche non vengono usati come link diretto.", ""])
 
     lines.append("## Note ufficiali trovate")
     if not notes:
