@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from insider_sources import MicrosoftSources
 
@@ -78,6 +80,25 @@ def write_report(report: dict[str, Any], build_key: str) -> tuple[Path, Path]:
     return json_path, md_path
 
 
+def find_direct_release_notes_url(notes: list[dict[str, Any]], build_number: int | str, ubr: int | str | None) -> str | None:
+    """Return only a build-specific Microsoft Learn release-notes URL, never Flight Hub."""
+    build = re.escape(str(build_number))
+    suffix = rf"-{re.escape(str(ubr))}" if ubr is not None else r"(?:-\d+)?"
+    expected_build = re.compile(rf"(?<!\d){build}{suffix}(?!\d)")
+    for note in notes:
+        url = str(note.get("url", ""))
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        if (
+            note.get("source") == "Microsoft Learn"
+            and parsed.netloc.lower() in {"learn.microsoft.com", "www.learn.microsoft.com"}
+            and "/windows-insider/release-notes/" in path
+            and expected_build.search(path)
+        ):
+            return url
+    return None
+
+
 def build_markdown_report(report: dict[str, Any]) -> str:
     build = report["build"]
     notes = report["notes"]
@@ -95,18 +116,16 @@ def build_markdown_report(report: dict[str, Any]) -> str:
     ]
     if direct_url:
         lines.extend([f"## [Apri le note ufficiali della build {build.get('FullBuild', 'corrente')}]({direct_url})", ""])
-    elif notes:
-        lines.extend(["## Link diretto alle note", "", "Non è stato possibile identificare un link diretto univoco. Consulta i link delle singole note riportati sotto.", ""])
     else:
-        lines.extend(["## Link alle note", "", "Non è ancora stato trovato un link diretto alle note di questa build; la ricerca verrà ripetuta al prossimo controllo.", ""])
+        lines.extend(["## Link diretto alle note", "", "Non è stata trovata una pagina Microsoft Learn di release notes che corrisponda esattamente a questa build. Il Flight Hub e le pagine generiche non vengono usati come link diretto.", ""])
 
-    lines.append("## Note ufficiali")
+    lines.append("## Note ufficiali trovate")
     if not notes:
         lines.extend(["", "Non sono state trovate note ufficiali per questa build. La ricerca verrà ripetuta al prossimo controllo."])
     else:
         lines.append("")
         for note in notes:
-            lines.extend([f"### {note['title']}", "", f"- Fonte: {note['source']}", f"- Link diretto: {note['url']}"])
+            lines.extend([f"### {note['title']}", "", f"- Fonte: {note['source']}", f"- Link: {note['url']}"])
             if note.get("summary"):
                 lines.extend(["", note["summary"]])
             lines.append("")
@@ -125,20 +144,15 @@ def check_once(force: bool = False) -> dict[str, Any]:
         print(f"Build {build_key}: invariata; note già raccolte. Nessuna nuova ricerca.")
         return {"skipped": True, "build": build, "notes": []}
 
-    notes = MicrosoftSources(build["CurrentBuild"]).search_all()
+    notes = MicrosoftSources(build["CurrentBuild"], build.get("UBR")).search_all()
+    direct_url = find_direct_release_notes_url(notes, build["CurrentBuild"], build.get("UBR"))
     status = "notes_found" if notes else "notes_pending"
-    # The sources return article URLs for matched notes. Prefer the Insider Blog
-    # article as the primary link; otherwise use the first matching official result.
-    primary_note = next((note for note in notes if note.get("source") == "Windows Insider Blog"), None)
-    if primary_note is None and notes:
-        primary_note = notes[0]
-
     report = {
         "build": build,
         "previous_build": previous_build,
         "build_changed": changed,
         "status": status,
-        "build_notes_url": primary_note.get("url") if primary_note else None,
+        "build_notes_url": direct_url,
         "notes": notes,
         "checked_at_utc": utc_now(),
     }
@@ -152,9 +166,10 @@ def check_once(force: bool = False) -> dict[str, Any]:
     })
 
     print(f"Build rilevata: {build_key} ({build.get('Channel', 'channel sconosciuto')})")
-    if notes:
-        print(f"Trovate {len(notes)} nota/e ufficiale/i.")
-        print(f"Link diretto alle note: {report['build_notes_url']}")
+    if direct_url:
+        print(f"Link diretto alle release notes: {direct_url}")
+    elif notes:
+        print("Risultati trovati, ma nessun link diretto alle release notes per questa build.")
     else:
         print("Note non ancora trovate: verranno cercate di nuovo al prossimo controllo.")
     print(f"Report: {md_path}")

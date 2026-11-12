@@ -19,8 +19,9 @@ class MicrosoftSources:
     LEARN_SEARCH_URL = "https://learn.microsoft.com/api/search?search={query}&locale=en-us&$top=10"
     USER_AGENT = "WindowsInsiderBuildAgent/0.1 (+https://github.com/one-angel997/windows-insider-build-agent)"
 
-    def __init__(self, build_number: int | str, timeout: int = 20) -> None:
+    def __init__(self, build_number: int | str, ubr: int | str | None = None, timeout: int = 20) -> None:
         self.build_number = str(build_number)
+        self.ubr = str(ubr) if ubr is not None else None
         self.timeout = timeout
 
     def _fetch_text(self, url: str) -> str:
@@ -64,7 +65,8 @@ class MicrosoftSources:
         return notes
 
     def search_learn(self) -> list[dict[str, Any]]:
-        query = quote(f'Windows 11 Insider Preview build {self.build_number}')
+        build_label = f"{self.build_number}-{self.ubr}" if self.ubr is not None else self.build_number
+        query = quote(f'Windows Insider release notes preview build {build_label}')
         body = self._fetch_text(self.LEARN_SEARCH_URL.format(query=query))
         if not body:
             return []
@@ -80,7 +82,7 @@ class MicrosoftSources:
             title = str(item.get("title") or "").strip()
             url = str(item.get("url") or "").strip()
             summary = str(item.get("description") or item.get("descriptionText") or "").strip()
-            if title and url and self._matches_build(f"{title} {summary}"):
+            if title and url and self._matches_build(f"{title} {url} {summary}"):
                 notes.append({"source": "Microsoft Learn", "title": title, "url": url, "summary": summary[:500]})
         return notes
 
